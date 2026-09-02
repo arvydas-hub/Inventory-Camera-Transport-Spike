@@ -1,5 +1,5 @@
 import { createBackend } from './backend.mjs';
-import { createCameraLifecycle } from './camera-lifecycle.mjs';
+import { createCameraLifecycle } from './camera-lifecycle.mjs?v=0.3.18-camera-cleanup-1';
 import { runTransportVariant } from './probes.mjs';
 
 const startCameraButton = document.getElementById('startCameraButton');
