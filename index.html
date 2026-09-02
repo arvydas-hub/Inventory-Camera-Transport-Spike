@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Inventory Camera Transport Spike</title>
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #080a0f;
+      --panel: #171a22;
+      --border: #3d4453;
+      --text: #f5f7fb;
+      --muted: #aeb7c8;
+      --primary: #3b82f6;
+      --danger: #ef4444;
+      --ok: #22c55e;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); }
+    main { width: min(880px, 100%); margin: 0 auto; padding: 18px; }
+    h1 { font-size: 1.5rem; margin: 0 0 8px; }
+    h2 { font-size: 1.05rem; margin: 0 0 12px; }
+    p { color: var(--muted); line-height: 1.45; }
+    section {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      margin: 14px 0;
+      padding: 16px;
+    }
+    .row { display: flex; flex-wrap: wrap; gap: 10px; }
+    button, input {
+      min-height: 46px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      font: inherit;
+    }
+    button {
+      background: #282d38;
+      color: var(--text);
+      padding: 10px 14px;
+      cursor: pointer;
+      font-weight: 650;
+    }
+    button.primary { background: var(--primary); border-color: var(--primary); }
+    button.danger { background: #6b1f29; border-color: var(--danger); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    input {
+      width: 100%;
+      background: #0e1118;
+      color: var(--text);
+      padding: 10px 12px;
+    }
+    label { display: block; color: var(--muted); margin-bottom: 6px; }
+    video, #reader {
+      width: 100%;
+      min-height: 220px;
+      margin-top: 12px;
+      border-radius: 10px;
+      background: #000;
+      overflow: hidden;
+    }
+    video { object-fit: cover; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin-top: 12px; }
+    th, td { padding: 8px; border: 1px solid var(--border); text-align: left; vertical-align: top; }
+    th { color: var(--muted); }
+    pre {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      max-height: 340px;
+      overflow: auto;
+      background: #090b10;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      font-size: 0.8rem;
+    }
+    iframe {
+      width: 100%;
+      min-height: 180px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #fff;
+      margin-top: 12px;
+    }
+    .status { margin: 10px 0 0; color: var(--muted); }
+    .status.ok { color: var(--ok); }
+    .status.error { color: #ff8080; }
+    .small { font-size: 0.85rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Inventory Camera Transport Spike</h1>
+    <p>
+      Staging-only diagnostic page. It keeps camera access in this top-level document and records
+      transport facts separately. Logs intentionally omit decoded values, credentials, and full URLs.
+    </p>
+
+    <section aria-labelledby="environmentHeading">
+      <h2 id="environmentHeading">Environment</h2>
+      <div id="environmentSummary" class="small"></div>
+    </section>
+
+    <section aria-labelledby="cameraHeading">
+      <h2 id="cameraHeading">Phase 1 — top-level camera</h2>
+      <div class="row">
+        <button id="startCameraButton" class="primary" type="button">Start camera probe</button>
+        <button id="startScannerButton" class="primary" type="button">Start continuous scanner</button>
+        <button id="stopCameraButton" class="danger" type="button">Stop camera</button>
+      </div>
+      <div id="cameraStatus" class="status" role="status" aria-live="polite">Not started.</div>
+      <video id="cameraPreview" playsinline muted hidden></video>
+      <div id="reader" hidden></div>
+    </section>
+
+    <section aria-labelledby="transportHeading">
+      <h2 id="transportHeading">Experiment A — direct Apps Script fetch</h2>
+      <label for="gasExecUrl">Shared Drive staging /exec URL</label>
+      <input
+        id="gasExecUrl"
+        type="url"
+        inputmode="url"
+        autocomplete="off"
+        spellcheck="false"
+        placeholder="https://script.google.com/macros/s/STAGING_DEPLOYMENT_ID/exec"
+      >
+      <p class="small">The value remains in page memory only and is not written to logs or storage.</p>
+      <div class="row">
+        <button type="button" data-transport-variant="text-plain">POST text/plain</button>
+        <button type="button" data-transport-variant="form-urlencoded">POST form</button>
+        <button type="button" data-transport-variant="application-json">POST JSON control</button>
+        <button type="button" data-transport-variant="no-cors">POST no-cors control</button>
+        <button type="button" data-transport-variant="get">GET comparison</button>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Variant</th>
+            <th>Fetch</th>
+            <th>Readable</th>
+            <th>ID match</th>
+            <th>Server result</th>
+            <th>Elapsed</th>
+          </tr>
+        </thead>
+        <tbody id="transportResults"></tbody>
+      </table>
+    </section>
+
+    <section aria-labelledby="bridgeHeading">
+      <h2 id="bridgeHeading">Experiment B — iframe embedding probe</h2>
+      <div class="row">
+        <button id="embedBridgeButton" type="button">Embed bridge probe</button>
+      </div>
+      <div id="bridgeStatus" class="status">Not started.</div>
+      <div id="bridgeContainer"></div>
+    </section>
+
+    <section aria-labelledby="logHeading">
+      <div class="row" style="justify-content:space-between; align-items:center;">
+        <h2 id="logHeading">Sanitized observations</h2>
+        <button id="clearLogButton" type="button">Clear log</button>
+      </div>
+      <pre id="probeLog" aria-live="polite"></pre>
+    </section>
+  </main>
+
+  <script type="module" src="./camera-spike.mjs"></script>
+</body>
+</html>
