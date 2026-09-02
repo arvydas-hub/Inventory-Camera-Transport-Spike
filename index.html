@@ -86,6 +86,12 @@
       background: #fff;
       margin-top: 12px;
     }
+    #appFrameContainer:empty { display: none; }
+    #appFrameContainer iframe {
+      height: 72vh;
+      height: 72dvh;
+      min-height: 560px;
+    }
     .status { margin: 10px 0 0; color: var(--muted); }
     .status.ok { color: var(--ok); }
     .status.error { color: #ff8080; }
@@ -163,6 +169,34 @@
       <div id="bridgeContainer"></div>
     </section>
 
+    <section aria-labelledby="appShellHeading">
+      <h2 id="appShellHeading">Experiment B3 — top-level scanner + inventory app</h2>
+      <p class="small">
+        Embeds the staging inventory UI while this top-level page owns the continuous camera.
+        Decoded and manually entered values are sent only after the app completes a verified handshake;
+        values are never logged or stored by this page.
+      </p>
+      <div class="row">
+        <button id="embedAppFrameButton" type="button">Embed / reload staging app</button>
+      </div>
+      <div id="appFrameStatus" class="status" role="status" aria-live="polite">
+        Embed the staging app before sending scans.
+      </div>
+      <label for="manualScanInput" style="margin-top:16px;">Manual staging code</label>
+      <input
+        id="manualScanInput"
+        type="text"
+        inputmode="text"
+        autocomplete="off"
+        spellcheck="false"
+        placeholder="Enter a mock code for the staging lookup"
+      >
+      <div class="row">
+        <button id="manualScanButton" type="button" disabled>Send code to staging app</button>
+      </div>
+      <div id="appFrameContainer"></div>
+    </section>
+
     <section aria-labelledby="logHeading">
       <div class="row" style="justify-content:space-between; align-items:center;">
         <h2 id="logHeading">Sanitized observations</h2>
@@ -172,6 +206,6 @@
     </section>
   </main>
 
-  <script type="module" src="./camera-spike.mjs?v=0.3.19-bridge-1"></script>
+  <script type="module" src="./camera-spike.mjs?v=0.3.20-shell-1"></script>
 </body>
 </html>

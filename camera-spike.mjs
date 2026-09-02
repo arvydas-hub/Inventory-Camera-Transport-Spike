@@ -2,6 +2,7 @@ import { createBackend } from './backend.mjs?v=0.3.18-transport-2';
 import { createCameraLifecycle } from './camera-lifecycle.mjs?v=0.3.18-camera-cleanup-2';
 import { runTransportVariant } from './probes.mjs?v=0.3.18-transport-2';
 import { createBridgeClient } from './bridge-client.mjs?v=0.3.19-bridge-1';
+import { createAppFrameClient } from './app-frame-client.mjs?v=0.3.20-shell-1';
 
 const startCameraButton = document.getElementById('startCameraButton');
 const startScannerButton = document.getElementById('startScannerButton');
@@ -16,13 +17,22 @@ const bridgeStatus = document.getElementById('bridgeStatus');
 const embedBridgeButton = document.getElementById('embedBridgeButton');
 const bridgePingButton = document.getElementById('bridgePingButton');
 const bridgeBatchButton = document.getElementById('bridgeBatchButton');
+const appFrameContainer = document.getElementById('appFrameContainer');
+const appFrameStatus = document.getElementById('appFrameStatus');
+const embedAppFrameButton = document.getElementById('embedAppFrameButton');
+const manualScanInput = document.getElementById('manualScanInput');
+const manualScanButton = document.getElementById('manualScanButton');
 const probeLog = document.getElementById('probeLog');
 
 const backend = createBackend({ mode: 'direct-fetch', timeoutMs: 15000 });
 let bridgeClient = null;
 let bridgeBackend = null;
+let appFrameClient = null;
+let appScanInFlight = false;
+let appSessionGeneration = 0;
 let decodeCount = 0;
-let lastDecodeSignature = '';
+let scanSequence = 0;
+let lastDecodedValue = '';
 let lastDecodeAt = 0;
 
 function cameraPolicyValue() {
@@ -149,18 +159,23 @@ function scannerConfig() {
 }
 
 function noteDecode(decodedText, decodedResult) {
+  const decodedValue = String(decodedText || '').trim();
+  if (!decodedValue) return;
   const now = Date.now();
-  const signature = `${String(decodedText).length}:${decodedResult?.result?.format?.formatName || ''}`;
-  if (signature === lastDecodeSignature && now - lastDecodeAt < 1200) return;
-  lastDecodeSignature = signature;
+  if (decodedValue === lastDecodedValue && now - lastDecodeAt < 1200) return;
+  lastDecodedValue = decodedValue;
   lastDecodeAt = now;
   decodeCount += 1;
+  scanSequence += 1;
+  const format = decodedResult?.result?.format?.formatName || 'unknown';
+  const metadata = {
+    sequence: scanSequence,
+    valueLength: decodedValue.length,
+    format,
+  };
   setCameraStatus(`Continuous scanner active. Decodes: ${decodeCount}`, 'ok');
-  logObservation('scanner-decoded', {
-    sequence: decodeCount,
-    valueLength: String(decodedText).length,
-    format: decodedResult?.result?.format?.formatName || 'unknown',
-  });
+  logObservation('scanner-decoded', metadata);
+  void submitInventoryScan(decodedValue, metadata);
 }
 
 async function startContinuousScanner() {
@@ -170,6 +185,8 @@ async function startContinuousScanner() {
     return;
   }
   decodeCount = 0;
+  lastDecodedValue = '';
+  lastDecodeAt = 0;
   setCameraStatus('Starting top-level continuous scanner...');
   logObservation('scanner-request', {
     origin: location.origin,
@@ -254,6 +271,221 @@ function isTopLevelDocument() {
   } catch {
     return false;
   }
+}
+
+function setAppFrameStatus(text, mode = '') {
+  appFrameStatus.textContent = text;
+  appFrameStatus.className = `status ${mode}`.trim();
+}
+
+function normalizedAppState(value) {
+  const candidate = typeof value === 'string'
+    ? value
+    : (value?.state || value?.appState || value?.status || '');
+  return String(candidate).trim().toLowerCase();
+}
+
+function normalizedOperationOutcome(value) {
+  const candidate = value?.outcome || value?.state || value?.status || '';
+  return String(candidate).trim().toLowerCase();
+}
+
+function renderAppFrameControls() {
+  const ready = Boolean(appFrameClient?.isReady());
+  manualScanButton.disabled = !ready || appScanInFlight;
+}
+
+function handleAppState(value) {
+  const state = normalizedAppState(value);
+  if (state === 'ready') {
+    setAppFrameStatus('Embedded inventory app ready for staging scans.', 'ok');
+  } else if (state === 'registration-required') {
+    setAppFrameStatus('Register this device inside the embedded app before sending scans.', 'error');
+  } else if (state === 'busy') {
+    setAppFrameStatus('Embedded inventory app is busy. Wait for the current action to finish.');
+  } else if (state === 'connecting' || state === 'initializing' || state === 'loaded') {
+    setAppFrameStatus('Embedded inventory app is initializing...');
+  } else if (state === 'closed' || state === 'disconnected' || state === 'idle') {
+    setAppFrameStatus('Embedded inventory app is disconnected.');
+  } else if (state === 'error' || state === 'init-error' || state === 'unavailable') {
+    setAppFrameStatus('Embedded inventory app could not become ready.', 'error');
+  }
+  renderAppFrameControls();
+}
+
+function handleOperationStatus(update) {
+  if (!update || update.operation !== 'update-quantity') return;
+  const outcome = normalizedOperationOutcome(update);
+  if (outcome === 'pending' || outcome === 'started' || outcome === 'updating') {
+    setAppFrameStatus('Embedded app is updating the staging quantity...');
+  } else if (outcome === 'success' || outcome === 'succeeded' || outcome === 'ok') {
+    setAppFrameStatus('Embedded app quantity update succeeded.', 'ok');
+  } else if (
+    outcome === 'failure'
+    || outcome === 'failed'
+    || outcome === 'error'
+    || outcome === 'rejected'
+    || outcome === 'runner-failure'
+  ) {
+    setAppFrameStatus('Embedded app quantity update failed.', 'error');
+  }
+}
+
+function handleAppFrameDiagnostic() {
+  if (!appFrameClient?.isReady()) {
+    setAppFrameStatus('Waiting for a verified message from the embedded staging app.');
+  }
+}
+
+function ensureAppFrameClient() {
+  if (!isTopLevelDocument()) {
+    throw bridgeSetupError(
+      'TOP_LEVEL_REQUIRED',
+      'Experiment B3 must run from the top-level diagnostic page.',
+    );
+  }
+  if (appFrameClient) return appFrameClient;
+
+  appFrameClient = createAppFrameClient({
+    readyTimeoutMs: 20000,
+    callTimeoutMs: 20000,
+    onAppState: handleAppState,
+    onOperationStatus: handleOperationStatus,
+    onDiagnostic: handleAppFrameDiagnostic,
+  });
+  return appFrameClient;
+}
+
+function appFrameErrorCode(error) {
+  const candidate = String(error?.code || error?.name || 'APP_FRAME_ERROR').toUpperCase();
+  return /^[A-Z][A-Z0-9_]{0,63}$/.test(candidate) ? candidate : 'APP_FRAME_ERROR';
+}
+
+function scanLogDetails(metadata, outcome, elapsedMs) {
+  return {
+    sequence: metadata.sequence,
+    outcome,
+    elapsedMs,
+    valueLength: metadata.valueLength,
+    format: metadata.format,
+  };
+}
+
+function scanResultOutcome(result) {
+  if (!result || result.ok !== true) return 'error';
+  if (result.outcome === 'found' || result.outcome === 'not-found') return result.outcome;
+  return 'error';
+}
+
+async function submitInventoryScan(value, metadata) {
+  const code = String(value || '').trim();
+  if (!code) return;
+
+  if (!appFrameClient?.isReady()) {
+    setAppFrameStatus('Scan was not sent because the embedded app is not ready.', 'error');
+    logObservation('app-scan-result', scanLogDetails(metadata, 'not-ready', 0));
+    renderAppFrameControls();
+    return;
+  }
+  if (appScanInFlight) {
+    setAppFrameStatus('Scan was not sent because the previous lookup is still running.');
+    logObservation('app-scan-result', scanLogDetails(metadata, 'busy', 0));
+    return;
+  }
+
+  const generation = appSessionGeneration;
+  const startedAt = performance.now();
+  appScanInFlight = true;
+  renderAppFrameControls();
+  setAppFrameStatus(`Looking up staging scan #${metadata.sequence}...`);
+
+  try {
+    const result = await appFrameClient.submitScan(code);
+    if (generation !== appSessionGeneration) return;
+
+    const elapsedMs = Math.max(0, Math.round(performance.now() - startedAt));
+    const outcome = scanResultOutcome(result);
+    if (outcome === 'found') {
+      setAppFrameStatus(`Staging scan #${metadata.sequence} found an item in ${elapsedMs} ms.`, 'ok');
+    } else if (outcome === 'not-found') {
+      setAppFrameStatus(`Staging scan #${metadata.sequence} did not find an item in ${elapsedMs} ms.`);
+    } else {
+      setAppFrameStatus(`Staging scan #${metadata.sequence} returned an invalid result.`, 'error');
+    }
+    logObservation('app-scan-result', scanLogDetails(metadata, outcome, elapsedMs));
+  } catch (error) {
+    if (generation !== appSessionGeneration) return;
+
+    const elapsedMs = Math.max(0, Math.round(performance.now() - startedAt));
+    setAppFrameStatus(
+      `Staging scan #${metadata.sequence} failed (${appFrameErrorCode(error)}).`,
+      'error',
+    );
+    logObservation('app-scan-result', scanLogDetails(metadata, 'error', elapsedMs));
+  } finally {
+    if (generation === appSessionGeneration) {
+      appScanInFlight = false;
+      renderAppFrameControls();
+    }
+  }
+}
+
+async function embedInventoryApp() {
+  embedAppFrameButton.disabled = true;
+  appSessionGeneration += 1;
+  appScanInFlight = false;
+  renderAppFrameControls();
+  setAppFrameStatus('Embedding the staging inventory app and verifying its handshake...');
+
+  let activeClient;
+  try {
+    activeClient = ensureAppFrameClient();
+  } catch (error) {
+    setAppFrameStatus(`Embedded app setup failed (${appFrameErrorCode(error)}).`, 'error');
+    embedAppFrameButton.disabled = false;
+    return;
+  }
+
+  activeClient.teardown();
+  appFrameContainer.replaceChildren();
+  try {
+    const appState = await activeClient.embed(gasExecUrl.value, appFrameContainer);
+    embedAppFrameButton.textContent = 'Reload staging app';
+    handleAppState(appState);
+    if (activeClient.isReady()) {
+      setAppFrameStatus('Embedded inventory app ready for staging scans.', 'ok');
+    } else {
+      handleAppState(activeClient.getAppState?.());
+    }
+  } catch (error) {
+    setAppFrameStatus(`Embedded app handshake failed (${appFrameErrorCode(error)}).`, 'error');
+  } finally {
+    embedAppFrameButton.disabled = false;
+    renderAppFrameControls();
+  }
+}
+
+function sendManualStagingScan() {
+  const code = manualScanInput.value.trim();
+  if (!code) {
+    setAppFrameStatus('Enter a mock staging code before sending.', 'error');
+    return;
+  }
+
+  scanSequence += 1;
+  const metadata = {
+    sequence: scanSequence,
+    valueLength: code.length,
+    format: 'manual',
+  };
+  manualScanInput.value = '';
+  void submitInventoryScan(code, metadata);
+}
+
+function teardownAppFrame() {
+  appSessionGeneration += 1;
+  appScanInFlight = false;
+  appFrameClient?.teardown();
 }
 
 function ensureBridgeClient() {
@@ -426,6 +658,8 @@ if (!isTopLevelDocument()) {
   embedBridgeButton.disabled = true;
   bridgeStatus.textContent = 'Experiment B requires this diagnostic to be the top-level page.';
   bridgeStatus.className = 'status error';
+  embedAppFrameButton.disabled = true;
+  setAppFrameStatus('Experiment B3 requires this diagnostic to be the top-level page.', 'error');
   logObservation('bridge-top-level-required');
 }
 
@@ -438,6 +672,11 @@ document.querySelectorAll('[data-transport-variant]').forEach((button) => {
 embedBridgeButton.addEventListener('click', embedBridgeProbe);
 bridgePingButton.addEventListener('click', runSingleBridgePing);
 bridgeBatchButton.addEventListener('click', runBridgeReliability);
+embedAppFrameButton.addEventListener('click', embedInventoryApp);
+manualScanButton.addEventListener('click', sendManualStagingScan);
+manualScanInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') sendManualStagingScan();
+});
 document.getElementById('clearLogButton').addEventListener('click', () => {
   probeLog.textContent = '';
 });
@@ -448,3 +687,5 @@ window.addEventListener('pagehide', () => stopCameraForLifecycle('pagehide'));
 window.addEventListener('beforeunload', () => stopCameraForLifecycle('beforeunload'));
 window.addEventListener('pagehide', () => bridgeClient?.teardown());
 window.addEventListener('beforeunload', () => bridgeClient?.teardown());
+window.addEventListener('pagehide', teardownAppFrame);
+window.addEventListener('beforeunload', teardownAppFrame);
