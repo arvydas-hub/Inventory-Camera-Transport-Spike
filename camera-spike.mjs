@@ -1,6 +1,7 @@
 import { createBackend } from './backend.mjs?v=0.3.18-transport-2';
 import { createCameraLifecycle } from './camera-lifecycle.mjs?v=0.3.18-camera-cleanup-2';
 import { runTransportVariant } from './probes.mjs?v=0.3.18-transport-2';
+import { createBridgeClient } from './bridge-client.mjs?v=0.3.19-bridge-1';
 
 const startCameraButton = document.getElementById('startCameraButton');
 const startScannerButton = document.getElementById('startScannerButton');
@@ -12,9 +13,14 @@ const gasExecUrl = document.getElementById('gasExecUrl');
 const transportResults = document.getElementById('transportResults');
 const bridgeContainer = document.getElementById('bridgeContainer');
 const bridgeStatus = document.getElementById('bridgeStatus');
+const embedBridgeButton = document.getElementById('embedBridgeButton');
+const bridgePingButton = document.getElementById('bridgePingButton');
+const bridgeBatchButton = document.getElementById('bridgeBatchButton');
 const probeLog = document.getElementById('probeLog');
 
 const backend = createBackend({ mode: 'direct-fetch', timeoutMs: 15000 });
+let bridgeClient = null;
+let bridgeBackend = null;
 let decodeCount = 0;
 let lastDecodeSignature = '';
 let lastDecodeAt = 0;
@@ -231,30 +237,175 @@ async function runTransport(variant, button) {
   }
 }
 
-function embedBridgeProbe() {
-  bridgeContainer.replaceChildren();
-  let endpoint;
+function bridgeErrorText(error) {
+  const code = error?.code || error?.name || 'BRIDGE_ERROR';
+  return `${code}: ${String(error?.message || 'Bridge operation failed.')}`;
+}
+
+function bridgeSetupError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function isTopLevelDocument() {
   try {
-    endpoint = new URL(gasExecUrl.value);
+    return window.top === window.self;
   } catch {
-    bridgeStatus.textContent = 'Enter a valid staging /exec URL first.';
+    return false;
+  }
+}
+
+function ensureBridgeClient() {
+  if (!isTopLevelDocument()) {
+    throw bridgeSetupError(
+      'TOP_LEVEL_REQUIRED',
+      'Experiment B must run from the top-level diagnostic page.',
+    );
+  }
+  if (bridgeClient && bridgeBackend) return bridgeClient;
+
+  bridgeClient = createBridgeClient({
+    readyTimeoutMs: 15000,
+    callTimeoutMs: 15000,
+    onDiagnostic(details) {
+      logObservation('bridge-ready-rejected', details);
+    },
+  });
+  bridgeBackend = createBackend({ mode: 'iframe-bridge', bridgeClient });
+  return bridgeClient;
+}
+
+async function callBridgePing() {
+  ensureBridgeClient();
+  const startedAt = performance.now();
+  const result = await bridgeBackend.call('bridgePing', []);
+  if (!result || result.ok !== true || typeof result.receivedAt !== 'string') {
+    throw new Error('The bridge returned an invalid ping result.');
+  }
+  return {
+    elapsedMs: Math.max(0, Math.round(performance.now() - startedAt)),
+    receivedAt: result.receivedAt,
+  };
+}
+
+async function runSingleBridgePing() {
+  bridgePingButton.disabled = true;
+  bridgeBatchButton.disabled = true;
+  bridgeStatus.textContent = 'Calling read-only bridgePing...';
+  try {
+    const result = await callBridgePing();
+    bridgeStatus.textContent = `bridgePing succeeded in ${result.elapsedMs} ms.`;
+    bridgeStatus.className = 'status ok';
+    logObservation('bridge-ping-result', { ok: true, elapsedMs: result.elapsedMs });
+  } catch (error) {
+    bridgeStatus.textContent = bridgeErrorText(error);
     bridgeStatus.className = 'status error';
+    logObservation('bridge-ping-result', {
+      ok: false,
+      errorCode: error?.code || error?.name || 'BRIDGE_ERROR',
+    });
+  } finally {
+    const ready = Boolean(bridgeClient?.isReady());
+    bridgePingButton.disabled = !ready;
+    bridgeBatchButton.disabled = !ready;
+  }
+}
+
+function percentile(sorted, fraction) {
+  if (!sorted.length) return null;
+  const index = Math.max(0, Math.ceil(sorted.length * fraction) - 1);
+  return sorted[index];
+}
+
+async function runBridgeReliability() {
+  embedBridgeButton.disabled = true;
+  bridgePingButton.disabled = true;
+  bridgeBatchButton.disabled = true;
+  const latencies = [];
+  const failures = {};
+  const total = 100;
+  let attempted = 0;
+
+  for (let index = 0; index < total; index += 1) {
+    bridgeStatus.textContent = `Running bridge reliability check ${index + 1}/${total}...`;
+    attempted += 1;
+    try {
+      const result = await callBridgePing();
+      latencies.push(result.elapsedMs);
+    } catch (error) {
+      const code = error?.code || error?.name || 'BRIDGE_ERROR';
+      failures[code] = (failures[code] || 0) + 1;
+      break;
+    }
+  }
+
+  const sorted = [...latencies].sort((a, b) => a - b);
+  const failed = attempted - sorted.length;
+  const summary = {
+    attempted,
+    succeeded: sorted.length,
+    failed,
+    p50Ms: percentile(sorted, 0.5),
+    p95Ms: percentile(sorted, 0.95),
+    failures,
+  };
+  bridgeStatus.textContent = failed === 0
+    ? `Bridge reliability passed 100/100 (p50 ${summary.p50Ms} ms, p95 ${summary.p95Ms} ms).`
+    : `Bridge reliability stopped after failure: ${sorted.length}/${attempted} succeeded.`;
+  bridgeStatus.className = failed === 0 ? 'status ok' : 'status error';
+  logObservation('bridge-reliability-result', summary);
+  embedBridgeButton.disabled = false;
+  const ready = Boolean(bridgeClient?.isReady());
+  bridgePingButton.disabled = !ready;
+  bridgeBatchButton.disabled = !ready;
+}
+
+async function embedBridgeProbe() {
+  embedBridgeButton.disabled = true;
+  bridgePingButton.disabled = true;
+  bridgeBatchButton.disabled = true;
+  bridgeStatus.textContent = 'Inserting the staging bridge and waiting for a verified ready message...';
+  bridgeStatus.className = 'status';
+  let activeBridge;
+  try {
+    activeBridge = ensureBridgeClient();
+  } catch (error) {
+    bridgeStatus.textContent = bridgeErrorText(error);
+    bridgeStatus.className = 'status error';
+    logObservation('bridge-setup-failed', {
+      errorCode: error?.code || error?.name || 'BRIDGE_ERROR',
+    });
+    embedBridgeButton.disabled = false;
     return;
   }
-  const nonce = crypto.randomUUID
-    ? crypto.randomUUID()
-    : `nonce-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
-  endpoint.searchParams.set('view', 'bridge-probe');
-  endpoint.searchParams.set('nonce', nonce);
-  endpoint.searchParams.set('parentOrigin', location.origin);
-  const frame = document.createElement('iframe');
-  frame.title = 'Apps Script bridge probe';
-  frame.src = endpoint.href;
-  frame.dataset.nonce = nonce;
-  bridgeContainer.appendChild(frame);
-  bridgeStatus.textContent = 'Bridge iframe inserted; waiting for load/console evidence.';
-  bridgeStatus.className = 'status';
-  logObservation('bridge-iframe-inserted', { parentOrigin: location.origin });
+  activeBridge.teardown();
+  bridgeContainer.replaceChildren();
+
+  try {
+    const readyPromise = activeBridge.embed(gasExecUrl.value, bridgeContainer);
+    const frame = bridgeContainer.querySelector('iframe');
+    if (frame) {
+      frame.addEventListener('load', () => {
+        logObservation('bridge-iframe-load-event');
+      }, { once: true });
+    }
+    const ready = await readyPromise;
+    bridgeStatus.textContent = 'Bridge ready; running the first read-only Apps Script ping...';
+    bridgeStatus.className = 'status ok';
+    logObservation('bridge-ready', { bridgeOrigin: ready.origin });
+    bridgePingButton.disabled = false;
+    bridgeBatchButton.disabled = false;
+    await runSingleBridgePing();
+  } catch (error) {
+    bridgeStatus.textContent = bridgeErrorText(error);
+    bridgeStatus.className = 'status error';
+    logObservation('bridge-handshake-failed', {
+      errorCode: error?.code || error?.name || 'BRIDGE_ERROR',
+    });
+  } finally {
+    embedBridgeButton.disabled = false;
+  }
 }
 
 document.getElementById('environmentSummary').textContent = [
@@ -271,13 +422,22 @@ logObservation('page-ready', {
   userAgent: navigator.userAgent,
 });
 
+if (!isTopLevelDocument()) {
+  embedBridgeButton.disabled = true;
+  bridgeStatus.textContent = 'Experiment B requires this diagnostic to be the top-level page.';
+  bridgeStatus.className = 'status error';
+  logObservation('bridge-top-level-required');
+}
+
 startCameraButton.addEventListener('click', startDirectCamera);
 startScannerButton.addEventListener('click', startContinuousScanner);
 stopCameraButton.addEventListener('click', () => stopAllCamera('manual'));
 document.querySelectorAll('[data-transport-variant]').forEach((button) => {
   button.addEventListener('click', () => runTransport(button.dataset.transportVariant, button));
 });
-document.getElementById('embedBridgeButton').addEventListener('click', embedBridgeProbe);
+embedBridgeButton.addEventListener('click', embedBridgeProbe);
+bridgePingButton.addEventListener('click', runSingleBridgePing);
+bridgeBatchButton.addEventListener('click', runBridgeReliability);
 document.getElementById('clearLogButton').addEventListener('click', () => {
   probeLog.textContent = '';
 });
@@ -286,3 +446,5 @@ document.addEventListener('visibilitychange', () => {
 });
 window.addEventListener('pagehide', () => stopCameraForLifecycle('pagehide'));
 window.addEventListener('beforeunload', () => stopCameraForLifecycle('beforeunload'));
+window.addEventListener('pagehide', () => bridgeClient?.teardown());
+window.addEventListener('beforeunload', () => bridgeClient?.teardown());

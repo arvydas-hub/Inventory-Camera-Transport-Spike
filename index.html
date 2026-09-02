@@ -153,10 +153,13 @@
 
     <section aria-labelledby="bridgeHeading">
       <h2 id="bridgeHeading">Experiment B — iframe embedding probe</h2>
+      <p class="small">The bridge is read-only and accepts only one zero-argument <code>bridgePing</code> call. Its nonce and endpoint remain in memory.</p>
       <div class="row">
-        <button id="embedBridgeButton" type="button" disabled>Embed bridge probe</button>
+        <button id="embedBridgeButton" type="button">Embed bridge probe</button>
+        <button id="bridgePingButton" type="button" disabled>Run one bridge ping</button>
+        <button id="bridgeBatchButton" type="button" disabled>Run 100 bridge pings</button>
       </div>
-      <div id="bridgeStatus" class="status">Locked until Experiment A is measured.</div>
+      <div id="bridgeStatus" class="status">Ready for the Experiment B embedding check.</div>
       <div id="bridgeContainer"></div>
     </section>
 
@@ -169,6 +172,6 @@
     </section>
   </main>
 
-  <script type="module" src="./camera-spike.mjs?v=0.3.18-camera-cleanup-2"></script>
+  <script type="module" src="./camera-spike.mjs?v=0.3.19-bridge-1"></script>
 </body>
 </html>
