@@ -1,4 +1,5 @@
 import { createBackend } from './backend.mjs';
+import { createCameraLifecycle } from './camera-lifecycle.mjs';
 import { runTransportVariant } from './probes.mjs';
 
 const startCameraButton = document.getElementById('startCameraButton');
@@ -14,13 +15,9 @@ const bridgeStatus = document.getElementById('bridgeStatus');
 const probeLog = document.getElementById('probeLog');
 
 const backend = createBackend({ mode: 'direct-fetch', timeoutMs: 15000 });
-let directStream = null;
-let scanner = null;
-let scannerRunning = false;
 let decodeCount = 0;
 let lastDecodeSignature = '';
 let lastDecodeAt = 0;
-let cameraRequestGeneration = 0;
 
 function cameraPolicyValue() {
   const policy = document.permissionsPolicy || document.featurePolicy;
@@ -55,40 +52,34 @@ function setCameraStatus(text, mode = '') {
   cameraStatus.className = `status ${mode}`.trim();
 }
 
-function stopDirectStream() {
-  if (directStream) {
-    directStream.getTracks().forEach((track) => track.stop());
-    directStream = null;
-  }
-  cameraPreview.srcObject = null;
-  cameraPreview.hidden = true;
+function renderCameraState(state) {
+  const idle = state === 'idle';
+  startCameraButton.disabled = !idle;
+  startScannerButton.disabled = !idle;
+  stopCameraButton.disabled = idle;
 }
 
-async function stopScanner() {
-  if (!scanner || !scannerRunning) {
-    reader.hidden = true;
-    return;
-  }
-  try {
-    await scanner.stop();
-  } catch (error) {
-    logObservation('scanner-stop-error', safeError(error));
-  }
-  try {
-    scanner.clear();
-  } catch {
-    // A partially started library instance may have no surface to clear.
-  }
-  scannerRunning = false;
-  reader.hidden = true;
-}
+const cameraLifecycle = createCameraLifecycle({
+  getUserMedia: (constraints) => navigator.mediaDevices.getUserMedia(constraints),
+  createScanner: () => new Html5Qrcode('reader'),
+  preview: cameraPreview,
+  reader,
+  isHidden: () => document.visibilityState === 'hidden',
+  onStateChange: renderCameraState,
+});
+renderCameraState(cameraLifecycle.getState());
 
-async function stopAllCamera() {
-  cameraRequestGeneration += 1;
-  stopDirectStream();
-  await stopScanner();
+async function stopAllCamera(reason = 'manual') {
+  await cameraLifecycle.stop(reason);
   setCameraStatus('Camera stopped.');
-  logObservation('camera-stopped');
+  logObservation('camera-stopped', { reason });
+}
+
+function stopCameraForLifecycle(reason) {
+  if (cameraLifecycle.getState() === 'idle') return;
+  setCameraStatus('Camera stopped.');
+  logObservation('camera-stopped', { reason });
+  void cameraLifecycle.stop(reason);
 }
 
 function publicTrackSettings(track) {
@@ -102,39 +93,27 @@ function publicTrackSettings(track) {
 }
 
 async function startDirectCamera() {
-  if (scannerRunning) {
-    setCameraStatus('Stop the continuous scanner before starting the direct camera probe.', 'error');
-    return;
-  }
-  const requestGeneration = ++cameraRequestGeneration;
-  stopDirectStream();
   setCameraStatus('Requesting top-level camera permission...');
   logObservation('camera-request', {
     origin: location.origin,
     secureContext: window.isSecureContext,
     cameraPolicy: cameraPolicyValue(),
   });
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({
+  const result = await cameraLifecycle.startDirect({
       video: { facingMode: 'environment' },
       audio: false,
-    });
-    if (requestGeneration !== cameraRequestGeneration) {
-      stream.getTracks().forEach((track) => track.stop());
-      logObservation('camera-request-cancelled');
-      return;
-    }
-    directStream = stream;
-    cameraPreview.srcObject = directStream;
-    cameraPreview.hidden = false;
-    await cameraPreview.play();
-    const videoTrack = directStream.getVideoTracks()[0];
+  });
+  if (result.ok) {
+    const videoTrack = result.stream.getVideoTracks()[0];
     setCameraStatus('Top-level camera stream opened.', 'ok');
     logObservation('camera-opened', { track: publicTrackSettings(videoTrack) });
-  } catch (error) {
-    stopDirectStream();
-    setCameraStatus(`Camera failed: ${error?.name || 'Error'}`, 'error');
-    logObservation('camera-failed', safeError(error));
+  } else if (result.code === 'CAMERA_CANCELLED') {
+    logObservation('camera-request-cancelled');
+  } else if (result.code === 'CAMERA_BUSY') {
+    setCameraStatus('Stop the current camera operation before starting another.', 'error');
+  } else {
+    setCameraStatus(`Camera failed: ${result.error?.name || 'Error'}`, 'error');
+    logObservation('camera-failed', safeError(result.error));
   }
 }
 
@@ -179,16 +158,11 @@ function noteDecode(decodedText, decodedResult) {
 }
 
 async function startContinuousScanner() {
-  if (scannerRunning) return;
-  cameraRequestGeneration += 1;
-  stopDirectStream();
   if (typeof Html5Qrcode !== 'function') {
     setCameraStatus('html5-qrcode did not load.', 'error');
     logObservation('scanner-library-missing');
     return;
   }
-  reader.hidden = false;
-  scanner = scanner || new Html5Qrcode('reader');
   decodeCount = 0;
   setCameraStatus('Starting top-level continuous scanner...');
   logObservation('scanner-request', {
@@ -196,21 +170,24 @@ async function startContinuousScanner() {
     secureContext: window.isSecureContext,
     cameraPolicy: cameraPolicyValue(),
   });
-  try {
-    await scanner.start(
+  const result = await cameraLifecycle.startScanner((candidate) => (
+    candidate.start(
       { facingMode: 'environment' },
       scannerConfig(),
       noteDecode,
       () => {},
-    );
-    scannerRunning = true;
+    )
+  ));
+  if (result.ok) {
     setCameraStatus('Continuous scanner active. Decodes: 0', 'ok');
     logObservation('scanner-opened');
-  } catch (error) {
-    scannerRunning = false;
-    reader.hidden = true;
-    setCameraStatus(`Scanner failed: ${error?.name || 'Error'}`, 'error');
-    logObservation('scanner-failed', safeError(error));
+  } else if (result.code === 'CAMERA_CANCELLED') {
+    logObservation('scanner-request-cancelled');
+  } else if (result.code === 'CAMERA_BUSY') {
+    setCameraStatus('Stop the current camera operation before starting another.', 'error');
+  } else {
+    setCameraStatus(`Scanner failed: ${result.error?.name || 'Error'}`, 'error');
+    logObservation('scanner-failed', safeError(result.error));
   }
 }
 
@@ -293,7 +270,7 @@ logObservation('page-ready', {
 
 startCameraButton.addEventListener('click', startDirectCamera);
 startScannerButton.addEventListener('click', startContinuousScanner);
-stopCameraButton.addEventListener('click', stopAllCamera);
+stopCameraButton.addEventListener('click', () => stopAllCamera('manual'));
 document.querySelectorAll('[data-transport-variant]').forEach((button) => {
   button.addEventListener('click', () => runTransport(button.dataset.transportVariant, button));
 });
@@ -301,7 +278,8 @@ document.getElementById('embedBridgeButton').addEventListener('click', embedBrid
 document.getElementById('clearLogButton').addEventListener('click', () => {
   probeLog.textContent = '';
 });
-window.addEventListener('pagehide', () => {
-  stopDirectStream();
-  if (scanner && scannerRunning) scanner.stop().catch(() => {});
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) stopCameraForLifecycle('document-hidden');
 });
+window.addEventListener('pagehide', () => stopCameraForLifecycle('pagehide'));
+window.addEventListener('beforeunload', () => stopCameraForLifecycle('beforeunload'));
