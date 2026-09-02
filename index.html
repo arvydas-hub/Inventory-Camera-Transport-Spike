@@ -154,9 +154,9 @@
     <section aria-labelledby="bridgeHeading">
       <h2 id="bridgeHeading">Experiment B — iframe embedding probe</h2>
       <div class="row">
-        <button id="embedBridgeButton" type="button">Embed bridge probe</button>
+        <button id="embedBridgeButton" type="button" disabled>Embed bridge probe</button>
       </div>
-      <div id="bridgeStatus" class="status">Not started.</div>
+      <div id="bridgeStatus" class="status">Locked until Experiment A is measured.</div>
       <div id="bridgeContainer"></div>
     </section>
 
@@ -169,6 +169,6 @@
     </section>
   </main>
 
-  <script type="module" src="./camera-spike.mjs?v=0.3.18-camera-cleanup-1"></script>
+  <script type="module" src="./camera-spike.mjs?v=0.3.18-camera-cleanup-2"></script>
 </body>
 </html>

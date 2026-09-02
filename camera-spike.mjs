@@ -1,6 +1,6 @@
-import { createBackend } from './backend.mjs?v=0.3.18-transport-1';
-import { createCameraLifecycle } from './camera-lifecycle.mjs?v=0.3.18-camera-cleanup-1';
-import { runTransportVariant } from './probes.mjs?v=0.3.18-transport-1';
+import { createBackend } from './backend.mjs?v=0.3.18-transport-2';
+import { createCameraLifecycle } from './camera-lifecycle.mjs?v=0.3.18-camera-cleanup-2';
+import { runTransportVariant } from './probes.mjs?v=0.3.18-transport-2';
 
 const startCameraButton = document.getElementById('startCameraButton');
 const startScannerButton = document.getElementById('startScannerButton');
@@ -198,7 +198,9 @@ function appendTransportResult(result) {
     result.ok ? 'resolved' : `failed (${result.errorCode || 'ERROR'})`,
     result.responseReadable ? 'yes' : 'no',
     result.requestIdMatched ? 'yes' : 'no',
-    result.serverReportedOk ? 'ok' : (result.ok ? 'unknown' : 'not readable'),
+    result.serverReportedOk
+      ? 'ok'
+      : (result.responseReadable ? `error (${result.errorCode || 'SERVER_ERROR'})` : 'not readable'),
     `${result.elapsedMs} ms`,
   ];
   cells.forEach((value) => {
@@ -217,6 +219,7 @@ async function runTransport(variant, button) {
     logObservation('transport-result', {
       variant: result.variant,
       ok: result.ok,
+      responseReceived: result.responseReceived,
       responseReadable: result.responseReadable,
       requestIdMatched: result.requestIdMatched,
       serverReportedOk: result.serverReportedOk,

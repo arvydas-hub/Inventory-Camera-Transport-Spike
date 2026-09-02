@@ -30,6 +30,8 @@ export function createCameraLifecycle({
   let state = 'idle';
   let directStream = null;
   let scanner = null;
+  let pendingScannerStart = null;
+  let cleanupPromise = null;
 
   function setState(nextState) {
     state = nextState;
@@ -95,7 +97,8 @@ export function createCameraLifecycle({
       return { ok: true, stream: acquiredStream };
     } catch (error) {
       if (acquiredStream) detachDirectStream(acquiredStream);
-      if (requestGeneration === generation) setState('idle');
+      if (requestGeneration !== generation) return { ok: false, code: 'CAMERA_CANCELLED' };
+      setState('idle');
       return { ok: false, code: 'CAMERA_START_FAILED', error };
     } finally {
       if (requestGeneration === generation && state === 'direct-starting') setState('idle');
@@ -109,12 +112,17 @@ export function createCameraLifecycle({
     }
 
     const requestGeneration = ++generation;
-    const candidate = createScanner();
-    scanner = candidate;
-    if (reader) reader.hidden = false;
+    let candidate = null;
+    let startPromise = null;
     setState('scanner-starting');
     try {
-      await start(candidate);
+      candidate = createScanner();
+      scanner = candidate;
+      if (reader) reader.hidden = false;
+      startPromise = Promise.resolve().then(() => start(candidate));
+      pendingScannerStart = startPromise;
+      await startPromise;
+      if (pendingScannerStart === startPromise) pendingScannerStart = null;
       if (requestGeneration !== generation || isHidden()) {
         await releaseScanner(candidate);
         if (scanner === candidate) scanner = null;
@@ -124,6 +132,7 @@ export function createCameraLifecycle({
       setState('scanner-running');
       return { ok: true, scanner: candidate };
     } catch (error) {
+      if (pendingScannerStart === startPromise) pendingScannerStart = null;
       await releaseScanner(candidate);
       if (scanner === candidate) scanner = null;
       if (requestGeneration === generation) setState('idle');
@@ -134,7 +143,8 @@ export function createCameraLifecycle({
     }
   }
 
-  async function stop(reason = 'manual') {
+  function stop(reason = 'manual') {
+    if (cleanupPromise) return cleanupPromise;
     const cleanupGeneration = ++generation;
     setState('stopping');
 
@@ -149,12 +159,25 @@ export function createCameraLifecycle({
 
     const ownedScanner = scanner;
     scanner = null;
+    const startToSettle = pendingScannerStart;
     stopReaderTracks();
     if (reader) reader.hidden = true;
-    await releaseScanner(ownedScanner);
-
-    if (cleanupGeneration === generation) setState('idle');
-    return { ok: true, reason };
+    cleanupPromise = (async () => {
+      await releaseScanner(ownedScanner);
+      if (startToSettle) {
+        try {
+          await startToSettle;
+        } catch {
+          // The start path returns its own structured error after cleanup.
+        }
+        await releaseScanner(ownedScanner);
+      }
+      if (cleanupGeneration === generation) setState('idle');
+      return { ok: true, reason };
+    })().finally(() => {
+      cleanupPromise = null;
+    });
+    return cleanupPromise;
   }
 
   return {

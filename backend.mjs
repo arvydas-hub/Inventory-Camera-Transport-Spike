@@ -109,7 +109,11 @@ async function parseReadableResponse(response, requestId) {
     throw new BackendError(
       'OPAQUE_RESPONSE',
       'The request may have been delivered, but browser JavaScript cannot read the response.',
-      { responseType: response ? response.type : 'missing' },
+      {
+        responseReceived: Boolean(response),
+        bodyReadable: false,
+        responseType: response ? response.type : 'missing',
+      },
     );
   }
 
@@ -117,7 +121,12 @@ async function parseReadableResponse(response, requestId) {
   try {
     text = await response.text();
   } catch {
-    throw new BackendError('UNREADABLE_RESPONSE', 'The browser could not read the response body.');
+    throw new BackendError('UNREADABLE_RESPONSE', 'The browser could not read the response body.', {
+      responseReceived: true,
+      bodyReadable: false,
+      status: response.status,
+      responseType: response.type,
+    });
   }
 
   let body;
@@ -126,6 +135,8 @@ async function parseReadableResponse(response, requestId) {
   } catch {
     throw new BackendError('INVALID_JSON', 'The readable response was not valid JSON.', {
       status: response.status,
+      responseReceived: true,
+      bodyReadable: true,
       responseType: response.type,
     });
   }
@@ -136,6 +147,8 @@ async function parseReadableResponse(response, requestId) {
       body?.error?.message || `The backend returned status ${response.status}.`,
       {
         status: response.status,
+        responseReceived: true,
+        bodyReadable: true,
         responseType: response.type,
         requestIdMatched: body?.requestId === requestId,
       },
@@ -144,6 +157,8 @@ async function parseReadableResponse(response, requestId) {
   if (body.requestId !== requestId) {
     throw new BackendError('REQUEST_ID_MISMATCH', 'The returned request ID did not match the request.', {
       status: response.status,
+      responseReceived: true,
+      bodyReadable: true,
       responseType: response.type,
     });
   }
@@ -196,13 +211,20 @@ export function createBackend(config = {}) {
       };
     } catch (error) {
       if (error?.name === 'AbortError') {
-        throw new BackendError('TIMEOUT', `The backend call exceeded ${timeoutMs} ms.`);
+        throw new BackendError('TIMEOUT', `The backend call exceeded ${timeoutMs} ms.`, {
+          responseReceived: false,
+          bodyReadable: false,
+        });
       }
       if (error instanceof BackendError) throw error;
       throw new BackendError(
         'FETCH_FAILED',
         'Browser fetch failed before a readable Apps Script response was available.',
-        { errorName: error?.name || 'Error' },
+        {
+          responseReceived: false,
+          bodyReadable: false,
+          errorName: error?.name || 'Error',
+        },
       );
     } finally {
       clearTimeout(timeout);
