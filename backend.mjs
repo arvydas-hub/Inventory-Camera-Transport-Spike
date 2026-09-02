@@ -55,9 +55,10 @@ function requestForVariant(endpoint, envelope, variant) {
     throw new BackendError('UNKNOWN_VARIANT', `Unsupported direct-fetch variant: ${variant}`);
   }
 
+  const url = new URL(endpoint);
+  url.searchParams.set('view', 'transport-probe');
+
   if (variant === 'get') {
-    const url = new URL(endpoint);
-    url.searchParams.set('view', 'transport-probe');
     url.searchParams.set('action', envelope.action);
     url.searchParams.set('requestId', envelope.requestId);
     url.searchParams.set('sentAt', envelope.sentAt);
@@ -78,7 +79,7 @@ function requestForVariant(endpoint, envelope, variant) {
     form.set('sentAt', envelope.sentAt);
     form.set('args', JSON.stringify(envelope.args));
     return {
-      url: endpoint,
+      url,
       init: {
         method: 'POST',
         redirect: 'follow',
@@ -100,7 +101,7 @@ function requestForVariant(endpoint, envelope, variant) {
     body: JSON.stringify(envelope),
   };
   if (variant === 'no-cors') init.mode = 'no-cors';
-  return { url: endpoint, init };
+  return { url, init };
 }
 
 async function parseReadableResponse(response, requestId) {
@@ -129,18 +130,22 @@ async function parseReadableResponse(response, requestId) {
     });
   }
 
+  if (!response.ok || body?.ok !== true) {
+    throw new BackendError(
+      body?.error?.code || 'SERVER_ERROR',
+      body?.error?.message || `The backend returned status ${response.status}.`,
+      {
+        status: response.status,
+        responseType: response.type,
+        requestIdMatched: body?.requestId === requestId,
+      },
+    );
+  }
   if (body.requestId !== requestId) {
     throw new BackendError('REQUEST_ID_MISMATCH', 'The returned request ID did not match the request.', {
       status: response.status,
       responseType: response.type,
     });
-  }
-  if (!response.ok || body.ok !== true) {
-    throw new BackendError(
-      body?.error?.code || 'SERVER_ERROR',
-      body?.error?.message || `The backend returned status ${response.status}.`,
-      { status: response.status, responseType: response.type },
-    );
   }
 
   return {

@@ -1,6 +1,6 @@
-import { createBackend } from './backend.mjs';
+import { createBackend } from './backend.mjs?v=0.3.18-transport-1';
 import { createCameraLifecycle } from './camera-lifecycle.mjs?v=0.3.18-camera-cleanup-1';
-import { runTransportVariant } from './probes.mjs';
+import { runTransportVariant } from './probes.mjs?v=0.3.18-transport-1';
 
 const startCameraButton = document.getElementById('startCameraButton');
 const startScannerButton = document.getElementById('startScannerButton');
