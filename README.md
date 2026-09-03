@@ -7,6 +7,7 @@ Public static staging probe for testing a top-level mobile camera and browser tr
 - The staging endpoint is entered in page memory for each test and is not persisted or logged.
 - Experiment B2 embeds a read-only staging bridge with one zero-argument `bridgePing`.
 - Experiment B3 embeds the existing staging application beneath the top-level scanner. The parent can submit only bounded decoded text to the app's lookup flow; identity, results, and user-clicked inventory controls stay inside Apps Script, and no parent message can request a mutation.
+- The v0.3.21 B3 controls wait for the verified app handshake, use a bounded two-attempt rear-camera strategy, suppress repeated reads until explicitly re-armed, and provide local photo decoding as a hardware-independent fallback.
 - Authoritative source, tests, and measured results are maintained in the private `Inventory-App-GSheet` repository.
 
 The hosted page is experimental and must not be treated as a production inventory client.

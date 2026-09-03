@@ -3,13 +3,25 @@ import { createCameraLifecycle } from './camera-lifecycle.mjs?v=0.3.18-camera-cl
 import { runTransportVariant } from './probes.mjs?v=0.3.18-transport-2';
 import { createBridgeClient } from './bridge-client.mjs?v=0.3.19-bridge-1';
 import { createAppFrameClient } from './app-frame-client.mjs?v=0.3.20-shell-1';
+import {
+  cameraErrorText,
+  isCameraPermissionError,
+  startCameraWithCompatibility,
+} from './camera-compat.mjs?v=0.3.21-compat-1';
+import { createScanGate, SCAN_GATE_REASON } from './scan-gate.mjs?v=0.3.21-compat-1';
 
 const startCameraButton = document.getElementById('startCameraButton');
 const startScannerButton = document.getElementById('startScannerButton');
 const stopCameraButton = document.getElementById('stopCameraButton');
+const stopScannerButton = document.getElementById('stopScannerButton');
+const scanPhotoButton = document.getElementById('scanPhotoButton');
+const scanPhotoInput = document.getElementById('scanPhotoInput');
+const rearmScanButton = document.getElementById('rearmScanButton');
+const cameraProbeStatus = document.getElementById('cameraProbeStatus');
 const cameraStatus = document.getElementById('cameraStatus');
 const cameraPreview = document.getElementById('cameraPreview');
 const reader = document.getElementById('reader');
+const photoReader = document.getElementById('photoReader');
 const gasExecUrl = document.getElementById('gasExecUrl');
 const transportResults = document.getElementById('transportResults');
 const bridgeContainer = document.getElementById('bridgeContainer');
@@ -28,12 +40,14 @@ const backend = createBackend({ mode: 'direct-fetch', timeoutMs: 15000 });
 let bridgeClient = null;
 let bridgeBackend = null;
 let appFrameClient = null;
+let appReadyForScans = false;
 let appScanInFlight = false;
+let photoScanInFlight = false;
+let photoScanGeneration = 0;
 let appSessionGeneration = 0;
 let decodeCount = 0;
 let scanSequence = 0;
-let lastDecodedValue = '';
-let lastDecodeAt = 0;
+const scanGate = createScanGate();
 
 function cameraPolicyValue() {
   const policy = document.permissionsPolicy || document.featurePolicy;
@@ -68,16 +82,60 @@ function setCameraStatus(text, mode = '') {
   cameraStatus.className = `status ${mode}`.trim();
 }
 
+function setCameraProbeStatus(text, mode = '') {
+  cameraProbeStatus.textContent = text;
+  cameraProbeStatus.className = `status ${mode}`.trim();
+}
+
+function isB3AppReady() {
+  return appReadyForScans && Boolean(appFrameClient?.isReady());
+}
+
+function renderB3Controls() {
+  const state = cameraLifecycle?.getState?.() || 'idle';
+  const idle = state === 'idle';
+  const scannerActive = state === 'scanner-starting' || state === 'scanner-running';
+  const ready = isB3AppReady();
+  const blocked = appScanInFlight || photoScanInFlight;
+  startScannerButton.disabled = !ready || !idle || blocked;
+  stopScannerButton.disabled = !scannerActive;
+  scanPhotoButton.disabled = !ready || !idle || blocked;
+  rearmScanButton.disabled = !ready
+    || state !== 'scanner-running'
+    || appScanInFlight
+    || !scanGate.hasLatch();
+  manualScanInput.disabled = !ready || blocked;
+  manualScanButton.disabled = !ready || blocked;
+}
+
 function renderCameraState(state) {
   const idle = state === 'idle';
   startCameraButton.disabled = !idle;
-  startScannerButton.disabled = !idle;
-  stopCameraButton.disabled = idle;
+  stopCameraButton.disabled = state !== 'direct-starting' && state !== 'direct-running';
+  renderB3Controls();
+}
+
+function supportedScannerFormats() {
+  return [
+    Html5QrcodeSupportedFormats.QR_CODE,
+    Html5QrcodeSupportedFormats.CODE_128,
+    Html5QrcodeSupportedFormats.CODE_39,
+    Html5QrcodeSupportedFormats.CODE_93,
+    Html5QrcodeSupportedFormats.EAN_13,
+    Html5QrcodeSupportedFormats.EAN_8,
+    Html5QrcodeSupportedFormats.UPC_A,
+    Html5QrcodeSupportedFormats.UPC_E,
+    Html5QrcodeSupportedFormats.ITF,
+    Html5QrcodeSupportedFormats.DATA_MATRIX,
+  ];
 }
 
 const cameraLifecycle = createCameraLifecycle({
   getUserMedia: (constraints) => navigator.mediaDevices.getUserMedia(constraints),
-  createScanner: () => new Html5Qrcode('reader'),
+  createScanner: () => new Html5Qrcode('reader', {
+    formatsToSupport: supportedScannerFormats(),
+    verbose: false,
+  }),
   preview: cameraPreview,
   reader,
   isHidden: () => document.visibilityState === 'hidden',
@@ -85,15 +143,30 @@ const cameraLifecycle = createCameraLifecycle({
 });
 renderCameraState(cameraLifecycle.getState());
 
-async function stopAllCamera(reason = 'manual') {
+async function stopDirectCamera(reason = 'manual') {
   await cameraLifecycle.stop(reason);
-  setCameraStatus('Camera stopped.');
+  setCameraProbeStatus('Camera probe stopped.');
   logObservation('camera-stopped', { reason });
 }
 
+async function stopContinuousScanner(reason = 'manual') {
+  photoScanGeneration += 1;
+  await cameraLifecycle.stop(reason);
+  scanGate.reset();
+  setCameraStatus('Scanner stopped. Start it again for a new scan session.');
+  logObservation('camera-stopped', { reason });
+  renderB3Controls();
+}
+
 function stopCameraForLifecycle(reason) {
-  if (cameraLifecycle.getState() === 'idle') return;
-  setCameraStatus('Camera stopped.');
+  const state = cameraLifecycle.getState();
+  if (state === 'idle') return;
+  if (state.startsWith('scanner')) {
+    scanGate.reset();
+    setCameraStatus('Scanner stopped because this page is no longer visible.');
+  } else {
+    setCameraProbeStatus('Camera probe stopped because this page is no longer visible.');
+  }
   logObservation('camera-stopped', { reason });
   void cameraLifecycle.stop(reason);
 }
@@ -109,7 +182,7 @@ function publicTrackSettings(track) {
 }
 
 async function startDirectCamera() {
-  setCameraStatus('Requesting top-level camera permission...');
+  setCameraProbeStatus('Requesting top-level camera permission...');
   logObservation('camera-request', {
     origin: location.origin,
     secureContext: window.isSecureContext,
@@ -121,97 +194,293 @@ async function startDirectCamera() {
   });
   if (result.ok) {
     const videoTrack = result.stream.getVideoTracks()[0];
-    setCameraStatus('Top-level camera stream opened.', 'ok');
+    setCameraProbeStatus('Top-level camera stream opened.', 'ok');
     logObservation('camera-opened', { track: publicTrackSettings(videoTrack) });
   } else if (result.code === 'CAMERA_CANCELLED') {
     logObservation('camera-request-cancelled');
   } else if (result.code === 'CAMERA_BUSY') {
-    setCameraStatus('Stop the current camera operation before starting another.', 'error');
+    setCameraProbeStatus('Stop the current camera operation before starting another.', 'error');
   } else {
-    setCameraStatus(`Camera failed: ${result.error?.name || 'Error'}`, 'error');
+    setCameraProbeStatus(`Camera failed: ${result.error?.name || 'Error'}`, 'error');
     logObservation('camera-failed', safeError(result.error));
   }
 }
 
-function scannerConfig() {
-  return {
-    fps: 10,
-    qrbox(viewfinderWidth, viewfinderHeight) {
-      const minEdge = Math.min(viewfinderWidth || 300, viewfinderHeight || 300);
-      const size = Math.max(180, Math.floor(minEdge * 0.72));
-      return { width: size, height: size };
-    },
-    aspectRatio: 1.333334,
-    rememberLastUsedCamera: true,
-    formatsToSupport: [
-      Html5QrcodeSupportedFormats.QR_CODE,
-      Html5QrcodeSupportedFormats.CODE_128,
-      Html5QrcodeSupportedFormats.CODE_39,
-      Html5QrcodeSupportedFormats.CODE_93,
-      Html5QrcodeSupportedFormats.EAN_13,
-      Html5QrcodeSupportedFormats.EAN_8,
-      Html5QrcodeSupportedFormats.UPC_A,
-      Html5QrcodeSupportedFormats.UPC_E,
-      Html5QrcodeSupportedFormats.ITF,
-      Html5QrcodeSupportedFormats.DATA_MATRIX,
-    ],
-  };
-}
+function acceptDecodedValue(decodedText, format = 'unknown') {
+  const admission = scanGate.admit(decodedText, {
+    ready: isB3AppReady(),
+    busy: appScanInFlight || photoScanInFlight,
+  });
+  if (!admission.accepted) {
+    if (admission.reason === SCAN_GATE_REASON.NOT_READY) {
+      setCameraStatus('Scanner paused: wait for the embedded staging app to become Ready.', 'error');
+    } else if (admission.reason === SCAN_GATE_REASON.BUSY) {
+      setCameraStatus('Scanner active. Waiting for the previous lookup to finish.');
+    }
+    return false;
+  }
 
-function noteDecode(decodedText, decodedResult) {
-  const decodedValue = String(decodedText || '').trim();
-  if (!decodedValue) return;
-  const now = Date.now();
-  if (decodedValue === lastDecodedValue && now - lastDecodeAt < 1200) return;
-  lastDecodedValue = decodedValue;
-  lastDecodeAt = now;
+  const decodedValue = admission.value;
   decodeCount += 1;
   scanSequence += 1;
-  const format = decodedResult?.result?.format?.formatName || 'unknown';
   const metadata = {
     sequence: scanSequence,
     valueLength: decodedValue.length,
     format,
   };
-  setCameraStatus(`Continuous scanner active. Decodes: ${decodeCount}`, 'ok');
+  setCameraStatus(
+    format === 'PHOTO'
+      ? 'Photo decoded locally and sent to the staging lookup.'
+      : `Continuous scanner active. Decodes: ${decodeCount}`,
+    'ok',
+  );
   logObservation('scanner-decoded', metadata);
   void submitInventoryScan(decodedValue, metadata);
+  renderB3Controls();
+  return true;
+}
+
+function noteDecode(decodedText, decodedResult) {
+  const format = decodedResult?.result?.format?.formatName || 'unknown';
+  acceptDecodedValue(decodedText, format);
+}
+
+async function startScannerAttempt(source, config) {
+  return cameraLifecycle.startScanner((candidate) => (
+    candidate.start(source, config, noteDecode, () => {})
+  ));
+}
+
+function cameraFailureDetails(error) {
+  return {
+    name: error?.name || 'Error',
+    code: error?.code || undefined,
+  };
 }
 
 async function startContinuousScanner() {
+  if (!isB3AppReady()) {
+    setCameraStatus('Embed the staging app and wait until it reports Ready.', 'error');
+    renderB3Controls();
+    return;
+  }
   if (typeof Html5Qrcode !== 'function') {
     setCameraStatus('html5-qrcode did not load.', 'error');
     logObservation('scanner-library-missing');
     return;
   }
+  if (window.isSecureContext !== true) {
+    setCameraStatus('Camera scanning requires a secure HTTPS page.', 'error');
+    return;
+  }
+  if (cameraPolicyValue() === 'false') {
+    setCameraStatus('This page blocks live camera access. Use Scan photo instead.', 'error');
+    return;
+  }
   decodeCount = 0;
-  lastDecodedValue = '';
-  lastDecodeAt = 0;
+  scanGate.reset();
   setCameraStatus('Starting top-level continuous scanner...');
   logObservation('scanner-request', {
     origin: location.origin,
     secureContext: window.isSecureContext,
     cameraPolicy: cameraPolicyValue(),
   });
-  const result = await cameraLifecycle.startScanner((candidate) => (
-    candidate.start(
-      { facingMode: 'environment' },
-      scannerConfig(),
-      noteDecode,
-      () => {},
-    )
-  ));
+  const result = await startCameraWithCompatibility({
+    startAttempt: startScannerAttempt,
+    enumerateCameras: () => Html5Qrcode.getCameras(),
+    canContinue: () => document.visibilityState !== 'hidden' && isB3AppReady(),
+  });
   if (result.ok) {
     setCameraStatus('Continuous scanner active. Decodes: 0', 'ok');
-    logObservation('scanner-opened');
+    logObservation('scanner-opened', {
+      compatibilityFallback: result.compatibilityFallback === true,
+    });
   } else if (result.code === 'CAMERA_CANCELLED') {
     logObservation('scanner-request-cancelled');
   } else if (result.code === 'CAMERA_BUSY') {
     setCameraStatus('Stop the current camera operation before starting another.', 'error');
   } else {
-    setCameraStatus(`Scanner failed: ${result.error?.name || 'Error'}`, 'error');
-    logObservation('scanner-failed', safeError(result.error));
+    const permissionHint = isCameraPermissionError(result.error)
+      ? ' Camera permission was denied; use Scan photo or allow camera access.'
+      : ' Use Scan photo, or retry after closing other camera apps.';
+    setCameraStatus(`Scanner failed: ${result.error?.name || 'Error'}.${permissionHint}`, 'error');
+    logObservation('scanner-failed', cameraFailureDetails(result.error));
   }
+  renderB3Controls();
+}
+
+const MAX_SCAN_PHOTO_EDGE = 2048;
+
+function photoPreparationError(code) {
+  const error = new Error(code);
+  error.code = code;
+  return error;
+}
+
+function preparePhotoForScan(file) {
+  return new Promise((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(file);
+    const image = new Image();
+    let released = false;
+    const releaseUrl = () => {
+      if (released) return;
+      released = true;
+      URL.revokeObjectURL(objectUrl);
+    };
+
+    image.onload = () => {
+      const width = image.naturalWidth || image.width;
+      const height = image.naturalHeight || image.height;
+      if (!width || !height) {
+        releaseUrl();
+        reject(photoPreparationError('PHOTO_LOAD_FAILED'));
+        return;
+      }
+      if (Math.max(width, height) <= MAX_SCAN_PHOTO_EDGE) {
+        releaseUrl();
+        resolve(file);
+        return;
+      }
+
+      const scale = MAX_SCAN_PHOTO_EDGE / Math.max(width, height);
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(width * scale));
+      canvas.height = Math.max(1, Math.round(height * scale));
+      const context = canvas.getContext('2d');
+      if (!context || typeof canvas.toBlob !== 'function') {
+        releaseUrl();
+        reject(photoPreparationError('PHOTO_RESIZE_UNSUPPORTED'));
+        return;
+      }
+
+      try {
+        context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      } catch {
+        releaseUrl();
+        reject(photoPreparationError('PHOTO_RESIZE_FAILED'));
+        return;
+      }
+      releaseUrl();
+      try {
+        canvas.toBlob((blob) => {
+          if (!blob) {
+            reject(photoPreparationError('PHOTO_RESIZE_FAILED'));
+            return;
+          }
+          try {
+            resolve(new File([blob], 'inventory-scan.jpg', {
+              type: 'image/jpeg',
+              lastModified: file.lastModified || Date.now(),
+            }));
+          } catch {
+            reject(photoPreparationError('PHOTO_RESIZE_UNSUPPORTED'));
+          }
+        }, 'image/jpeg', 0.9);
+      } catch {
+        reject(photoPreparationError('PHOTO_RESIZE_FAILED'));
+      }
+    };
+    image.onerror = () => {
+      releaseUrl();
+      reject(photoPreparationError('PHOTO_LOAD_FAILED'));
+    };
+    image.onabort = image.onerror;
+    image.src = objectUrl;
+  });
+}
+
+function photoScanErrorMessage(error) {
+  const text = cameraErrorText(error).toLowerCase();
+  if (String(error?.code || '').startsWith('PHOTO_')) {
+    return 'That photo could not be prepared safely. Try a smaller or cropped image.';
+  }
+  if (text.includes('ongoing camera scan') || text.includes('invalidstate')) {
+    return 'The scanner is still busy. Wait a moment, then try Scan photo again.';
+  }
+  if (text.includes('parse error') || text.includes('notfound') || text.includes('no multi')) {
+    return 'No supported barcode or QR code was found. Try a sharper, well-lit photo.';
+  }
+  return 'That photo could not be scanned. Try a smaller, sharper image with the complete code visible.';
+}
+
+function chooseScanPhoto() {
+  if (!isB3AppReady()) {
+    setCameraStatus('Embed the staging app and wait until it reports Ready.', 'error');
+    return;
+  }
+  if (cameraLifecycle.getState() !== 'idle' || appScanInFlight || photoScanInFlight) {
+    setCameraStatus('Stop the live scanner and wait for the current lookup before scanning a photo.');
+    return;
+  }
+  if (typeof Html5Qrcode !== 'function') {
+    setCameraStatus('The scanner library did not load. Reload this page and try again.', 'error');
+    return;
+  }
+  scanPhotoInput.value = '';
+  scanPhotoInput.click();
+}
+
+async function handleScanPhoto(event) {
+  const file = event.target.files?.[0] || null;
+  if (!file) return;
+  if (
+    !isB3AppReady()
+    || cameraLifecycle.getState() !== 'idle'
+    || appScanInFlight
+    || photoScanInFlight
+  ) {
+    scanPhotoInput.value = '';
+    setCameraStatus('Photo was not scanned because the staging app is not ready.', 'error');
+    return;
+  }
+
+  const generation = ++photoScanGeneration;
+  photoScanInFlight = true;
+  renderB3Controls();
+  setCameraStatus('Scanning photo locally...');
+  let scanner = null;
+  try {
+    const preparedFile = await preparePhotoForScan(file);
+    if (generation !== photoScanGeneration || !isB3AppReady()) return;
+    scanner = new Html5Qrcode('photoReader', {
+      formatsToSupport: supportedScannerFormats(),
+      verbose: false,
+    });
+    const decodedText = await scanner.scanFile(preparedFile, false);
+    if (generation !== photoScanGeneration || !isB3AppReady()) return;
+    photoScanInFlight = false;
+    scanGate.rearm();
+    acceptDecodedValue(decodedText, 'PHOTO');
+  } catch (error) {
+    if (generation === photoScanGeneration) {
+      setCameraStatus(photoScanErrorMessage(error), 'error');
+      logObservation('photo-scan-result', {
+        outcome: 'error',
+        errorCode: appFrameErrorCode(error),
+      });
+    }
+  } finally {
+    try {
+      scanner?.clear();
+    } catch {
+      // A failed file scan may leave no rendered scanner surface to clear.
+    }
+    if (generation === photoScanGeneration) photoScanInFlight = false;
+    scanPhotoInput.value = '';
+    renderB3Controls();
+  }
+}
+
+function rearmSameCode() {
+  if (!isB3AppReady() || appScanInFlight || cameraLifecycle.getState() !== 'scanner-running') {
+    renderB3Controls();
+    return;
+  }
+  if (scanGate.rearm().rearmed) {
+    setCameraStatus('Same-code latch cleared. Hold the code in view to scan it once more.', 'ok');
+    logObservation('scanner-rearmed');
+  }
+  renderB3Controls();
 }
 
 function appendTransportResult(result) {
@@ -290,13 +559,10 @@ function normalizedOperationOutcome(value) {
   return String(candidate).trim().toLowerCase();
 }
 
-function renderAppFrameControls() {
-  const ready = Boolean(appFrameClient?.isReady());
-  manualScanButton.disabled = !ready || appScanInFlight;
-}
-
 function handleAppState(value) {
   const state = normalizedAppState(value);
+  const wasReady = appReadyForScans;
+  appReadyForScans = state === 'ready';
   if (state === 'ready') {
     setAppFrameStatus('Embedded inventory app ready for staging scans.', 'ok');
   } else if (state === 'registration-required') {
@@ -310,7 +576,14 @@ function handleAppState(value) {
   } else if (state === 'error' || state === 'init-error' || state === 'unavailable') {
     setAppFrameStatus('Embedded inventory app could not become ready.', 'error');
   }
-  renderAppFrameControls();
+  if (wasReady && !appReadyForScans) {
+    photoScanGeneration += 1;
+    photoScanInFlight = false;
+    if (cameraLifecycle.getState().startsWith('scanner')) {
+      void stopContinuousScanner('app-not-ready');
+    }
+  }
+  renderB3Controls();
 }
 
 function handleOperationStatus(update) {
@@ -381,10 +654,10 @@ async function submitInventoryScan(value, metadata) {
   const code = String(value || '').trim();
   if (!code) return;
 
-  if (!appFrameClient?.isReady()) {
+  if (!isB3AppReady()) {
     setAppFrameStatus('Scan was not sent because the embedded app is not ready.', 'error');
     logObservation('app-scan-result', scanLogDetails(metadata, 'not-ready', 0));
-    renderAppFrameControls();
+    renderB3Controls();
     return;
   }
   if (appScanInFlight) {
@@ -396,7 +669,7 @@ async function submitInventoryScan(value, metadata) {
   const generation = appSessionGeneration;
   const startedAt = performance.now();
   appScanInFlight = true;
-  renderAppFrameControls();
+  renderB3Controls();
   setAppFrameStatus(`Looking up staging scan #${metadata.sequence}...`);
 
   try {
@@ -417,24 +690,39 @@ async function submitInventoryScan(value, metadata) {
     if (generation !== appSessionGeneration) return;
 
     const elapsedMs = Math.max(0, Math.round(performance.now() - startedAt));
-    setAppFrameStatus(
-      `Staging scan #${metadata.sequence} failed (${appFrameErrorCode(error)}).`,
-      'error',
-    );
-    logObservation('app-scan-result', scanLogDetails(metadata, 'error', elapsedMs));
+    const errorCode = appFrameErrorCode(error);
+    setAppFrameStatus(`Staging scan #${metadata.sequence} failed (${errorCode}).`, 'error');
+    logObservation('app-scan-result', {
+      ...scanLogDetails(metadata, 'error', elapsedMs),
+      errorCode,
+    });
   } finally {
     if (generation === appSessionGeneration) {
       appScanInFlight = false;
-      renderAppFrameControls();
+      renderB3Controls();
     }
   }
 }
 
+function clearElement(element) {
+  if (typeof element.replaceChildren === 'function') {
+    element.replaceChildren();
+    return;
+  }
+  while (element.firstChild) element.removeChild(element.firstChild);
+}
+
 async function embedInventoryApp() {
   embedAppFrameButton.disabled = true;
+  if (cameraLifecycle.getState().startsWith('scanner')) {
+    await stopContinuousScanner('app-reload');
+  }
+  photoScanGeneration += 1;
+  photoScanInFlight = false;
   appSessionGeneration += 1;
+  appReadyForScans = false;
   appScanInFlight = false;
-  renderAppFrameControls();
+  renderB3Controls();
   setAppFrameStatus('Embedding the staging inventory app and verifying its handshake...');
 
   let activeClient;
@@ -447,7 +735,7 @@ async function embedInventoryApp() {
   }
 
   activeClient.teardown();
-  appFrameContainer.replaceChildren();
+  clearElement(appFrameContainer);
   try {
     const appState = await activeClient.embed(gasExecUrl.value, appFrameContainer);
     embedAppFrameButton.textContent = 'Reload staging app';
@@ -461,11 +749,21 @@ async function embedInventoryApp() {
     setAppFrameStatus(`Embedded app handshake failed (${appFrameErrorCode(error)}).`, 'error');
   } finally {
     embedAppFrameButton.disabled = false;
-    renderAppFrameControls();
+    renderB3Controls();
   }
 }
 
 function sendManualStagingScan() {
+  if (!isB3AppReady()) {
+    setAppFrameStatus('Wait until the embedded staging app reports Ready.', 'error');
+    renderB3Controls();
+    return;
+  }
+  if (appScanInFlight || photoScanInFlight) {
+    setAppFrameStatus('Wait for the current staging lookup to finish.');
+    renderB3Controls();
+    return;
+  }
   const code = manualScanInput.value.trim();
   if (!code) {
     setAppFrameStatus('Enter a mock staging code before sending.', 'error');
@@ -484,8 +782,15 @@ function sendManualStagingScan() {
 
 function teardownAppFrame() {
   appSessionGeneration += 1;
+  appReadyForScans = false;
   appScanInFlight = false;
+  photoScanGeneration += 1;
+  photoScanInFlight = false;
   appFrameClient?.teardown();
+  if (cameraLifecycle.getState().startsWith('scanner')) {
+    void stopContinuousScanner('app-teardown');
+  }
+  renderB3Controls();
 }
 
 function ensureBridgeClient() {
@@ -612,7 +917,7 @@ async function embedBridgeProbe() {
     return;
   }
   activeBridge.teardown();
-  bridgeContainer.replaceChildren();
+  clearElement(bridgeContainer);
 
   try {
     const readyPromise = activeBridge.embed(gasExecUrl.value, bridgeContainer);
@@ -665,7 +970,11 @@ if (!isTopLevelDocument()) {
 
 startCameraButton.addEventListener('click', startDirectCamera);
 startScannerButton.addEventListener('click', startContinuousScanner);
-stopCameraButton.addEventListener('click', () => stopAllCamera('manual'));
+stopCameraButton.addEventListener('click', () => stopDirectCamera('manual'));
+stopScannerButton.addEventListener('click', () => stopContinuousScanner('manual'));
+scanPhotoButton.addEventListener('click', chooseScanPhoto);
+scanPhotoInput.addEventListener('change', handleScanPhoto);
+rearmScanButton.addEventListener('click', rearmSameCode);
 document.querySelectorAll('[data-transport-variant]').forEach((button) => {
   button.addEventListener('click', () => runTransport(button.dataset.transportVariant, button));
 });

@@ -96,6 +96,23 @@
     .status.ok { color: var(--ok); }
     .status.error { color: #ff8080; }
     .small { font-size: 0.85rem; }
+    .workflow-step {
+      border-left: 3px solid var(--primary);
+      padding-left: 12px;
+      margin: 14px 0;
+    }
+    .workflow-step > p { margin: 6px 0 10px; }
+    .visually-hidden {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
   </style>
 </head>
 <body>
@@ -113,14 +130,13 @@
 
     <section aria-labelledby="cameraHeading">
       <h2 id="cameraHeading">Phase 1 — top-level camera</h2>
+      <p class="small">Raw camera permission probe only. The working inventory scanner is in Experiment B3 below.</p>
       <div class="row">
         <button id="startCameraButton" class="primary" type="button">Start camera probe</button>
-        <button id="startScannerButton" class="primary" type="button">Start continuous scanner</button>
-        <button id="stopCameraButton" class="danger" type="button">Stop camera</button>
+        <button id="stopCameraButton" class="danger" type="button" disabled>Stop camera probe</button>
       </div>
-      <div id="cameraStatus" class="status" role="status" aria-live="polite">Not started.</div>
+      <div id="cameraProbeStatus" class="status" role="status" aria-live="polite">Not started.</div>
       <video id="cameraPreview" playsinline muted hidden></video>
-      <div id="reader" hidden></div>
     </section>
 
     <section aria-labelledby="transportHeading">
@@ -182,17 +198,38 @@
       <div id="appFrameStatus" class="status" role="status" aria-live="polite">
         Embed the staging app before sending scans.
       </div>
-      <label for="manualScanInput" style="margin-top:16px;">Manual staging code</label>
-      <input
-        id="manualScanInput"
-        type="text"
-        inputmode="text"
-        autocomplete="off"
-        spellcheck="false"
-        placeholder="Enter a mock code for the staging lookup"
-      >
-      <div class="row">
-        <button id="manualScanButton" type="button" disabled>Send code to staging app</button>
+
+      <div class="workflow-step">
+        <strong>1. Scan a code</strong>
+        <p class="small">Scanner and photo buttons unlock only after the embedded staging app reports Ready.</p>
+        <div class="row">
+          <button id="startScannerButton" class="primary" type="button" disabled>Start scanner</button>
+          <button id="stopScannerButton" class="danger" type="button" disabled>Stop scanner</button>
+          <button id="scanPhotoButton" type="button" disabled>Scan photo</button>
+          <button id="rearmScanButton" type="button" disabled>Scan same code again</button>
+        </div>
+        <label class="visually-hidden" for="scanPhotoInput">Take or choose a barcode photo</label>
+        <input id="scanPhotoInput" type="file" accept="image/*" capture="environment" hidden>
+        <div id="cameraStatus" class="status" role="status" aria-live="polite">
+          Embed the staging app before starting the scanner.
+        </div>
+        <div id="reader" hidden></div>
+        <div id="photoReader" hidden aria-hidden="true"></div>
+      </div>
+
+      <div class="workflow-step">
+        <label for="manualScanInput"><strong>2. Or enter a mock staging code</strong></label>
+        <input
+          id="manualScanInput"
+          type="text"
+          inputmode="text"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="Enter a mock code for the staging lookup"
+        >
+        <div class="row">
+          <button id="manualScanButton" type="button" disabled>Send code to staging app</button>
+        </div>
       </div>
       <div id="appFrameContainer"></div>
     </section>
@@ -206,6 +243,6 @@
     </section>
   </main>
 
-  <script type="module" src="./camera-spike.mjs?v=0.3.20-shell-1"></script>
+  <script type="module" src="./camera-spike.mjs?v=0.3.21-compat-1"></script>
 </body>
 </html>

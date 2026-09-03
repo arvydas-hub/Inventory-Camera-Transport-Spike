@@ -237,7 +237,7 @@ export function createBackend(config = {}) {
     },
 
     setMode(nextMode) {
-      if (!['direct-fetch', 'iframe-bridge', 'same-origin-proxy'].includes(nextMode)) {
+      if (!['direct-fetch', 'iframe-bridge'].includes(nextMode)) {
         throw new BackendError('UNKNOWN_MODE', `Unsupported backend mode: ${nextMode}`);
       }
       mode = nextMode;
@@ -250,9 +250,6 @@ export function createBackend(config = {}) {
       if (mode === 'direct-fetch') return directFetchCall(functionName, args, options);
       if (mode === 'iframe-bridge' && config.bridgeClient?.call) {
         return config.bridgeClient.call(functionName, args, options);
-      }
-      if (mode === 'same-origin-proxy') {
-        throw new BackendError('PROXY_NOT_CONFIGURED', 'The same-origin proxy has not been configured.');
       }
       throw new BackendError('BRIDGE_NOT_READY', 'The iframe bridge has not completed its handshake.');
     },
