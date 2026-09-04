@@ -619,6 +619,7 @@ export function bootstrapExternalCameraPage({
   createLifecycle = createCameraLifecycle,
   startCamera = startCameraWithCompatibility,
   scannerLibraryLoader = loadExternalScannerLibrary,
+  automaticStart = true,
 } = {}) {
   if (!windowObject || !documentObject || !locationObject) return null;
 
@@ -663,6 +664,7 @@ export function bootstrapExternalCameraPage({
   let client = null;
   let openerMonitor = null;
   let terminated = false;
+  let automaticStartPending = automaticStart === true;
   const scanGate = createScanGate();
 
   const updateButtons = () => {
@@ -724,7 +726,14 @@ export function bootstrapExternalCameraPage({
       lifecycle = buildLifecycle();
       scannerReady = true;
       updateButtons();
-      if (connected) setStatus('Connected. Tap Start camera when you are ready.', 'ok');
+      if (connected) {
+        setStatus(
+          automaticStartPending
+            ? 'Connected. Preparing the camera…'
+            : 'Connected. Tap Start camera when you are ready.',
+          'ok',
+        );
+      }
       return true;
     }).catch(() => {
       scannerReady = false;
@@ -750,7 +759,9 @@ export function bootstrapExternalCameraPage({
         connected = true;
         updateButtons();
         setStatus('Connected. Loading the local scanner library…');
-        void ensureScannerLibrary();
+        void ensureScannerLibrary().then((loaded) => {
+          if (loaded) maybeStartScannerAutomatically();
+        });
       },
       onReceipt() {
         setStatus('Scan received by the inventory app. Waiting for the lookup…');
@@ -780,6 +791,20 @@ export function bootstrapExternalCameraPage({
     return null;
   }
 
+  function returnToInventory(
+    reason = 'return-to-inventory',
+    fallbackMessage = 'Return to the inventory tab; this browser kept the camera tab open.',
+  ) {
+    const cleanup = terminate(reason);
+    try { windowObject.opener.focus(); } catch {}
+    try { windowObject.close(); } catch {}
+    if (!windowObject.closed) {
+      void cleanup.then(() => {
+        if (!windowObject.closed) setStatus(fallbackMessage, 'ok');
+      });
+    }
+  }
+
   async function handleDecoded(decodedText) {
     const admission = scanGate.admit(decodedText, {
       ready: client.isReady(),
@@ -799,6 +824,10 @@ export function bootstrapExternalCameraPage({
       } else {
         setStatus('Item not found. Return to the inventory window for the result.');
       }
+      returnToInventory(
+        'scan-complete',
+        'Scan complete. Tap Return to inventory or close this tab.',
+      );
     } catch (error) {
       const code = String(error?.code || 'LOOKUP_FAILURE');
       setStatus(`The inventory lookup failed (${code}). Return to inventory and try again.`, 'error');
@@ -808,8 +837,9 @@ export function bootstrapExternalCameraPage({
     }
   }
 
-  async function startScanner() {
+  async function startScanner({ automatic = false } = {}) {
     if (!scannerReady || !lifecycle || !client.isReady() || lastState !== 'idle' || lookupInFlight) return;
+    automaticStartPending = false;
     scanGate.rearm();
     setStatus('Starting camera…');
     const Html5QrcodeClass = windowObject.Html5Qrcode;
@@ -833,9 +863,32 @@ export function bootstrapExternalCameraPage({
         setStatus('Camera start stopped because this tab stayed hidden. Return here and tap Start camera again.');
       }
     } else {
-      setStatus(cameraFailureMessage(result.error), 'error');
+      const retry = automatic ? ' Tap Start camera to retry.' : '';
+      setStatus(`${cameraFailureMessage(result.error)}${retry}`, 'error');
     }
     updateButtons();
+    return result;
+  }
+
+  function maybeStartScannerAutomatically() {
+    if (
+      !automaticStartPending
+      || terminated
+      || !connected
+      || !scannerReady
+      || !lifecycle
+      || lastState !== 'idle'
+      || lookupInFlight
+    ) {
+      return false;
+    }
+    if (documentObject.visibilityState === 'hidden') {
+      setStatus('Connected. The camera will start when this tab is visible.', 'ok');
+      return false;
+    }
+    automaticStartPending = false;
+    void startScanner({ automatic: true });
+    return true;
   }
 
   async function stopScanner(reason = 'manual') {
@@ -844,18 +897,9 @@ export function bootstrapExternalCameraPage({
     updateButtons();
   }
 
-  startButton.addEventListener('click', startScanner);
+  startButton.addEventListener('click', () => startScanner());
   stopButton.addEventListener('click', () => stopScanner('manual'));
-  returnButton.addEventListener('click', () => {
-    const cleanup = terminate('return-to-inventory');
-    try { windowObject.opener.focus(); } catch {}
-    try { windowObject.close(); } catch {}
-    if (!windowObject.closed) {
-      void cleanup.then(() => {
-        setStatus('Return to the inventory tab; this browser kept the camera tab open.');
-      });
-    }
-  });
+  returnButton.addEventListener('click', () => returnToInventory());
 
   const stopForHiddenDocument = () => {
     if (
@@ -865,6 +909,8 @@ export function bootstrapExternalCameraPage({
     ) {
       setStatus('Camera stopped because this tab was hidden. Tap Start camera to resume.');
       void lifecycle.stop('document-hidden').then(updateButtons);
+    } else if (documentObject.visibilityState !== 'hidden') {
+      maybeStartScannerAutomatically();
     }
   };
   const teardown = () => { void terminate('page-exit'); };

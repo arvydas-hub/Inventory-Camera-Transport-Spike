@@ -127,8 +127,9 @@
       <h1 id="pageTitle">Inventory Camera</h1>
       <p class="muted">
         This separate camera page returns one decoded code to the page that opened it.
-        Use it only when you opened it yourself from staging Inventory, and start the camera only
-        after this page reports that it is connected.
+        Use it only when you opened it yourself from staging Inventory. The camera starts once
+        the secure connection is ready, then stops and returns after the lookup. Use Start camera
+        only if your browser requires a manual retry.
       </p>
       <div class="controls">
         <button id="startButton" class="primary" type="button" disabled>Start camera</button>
@@ -145,6 +146,6 @@
     </section>
   </main>
 
-  <script type="module" src="./external-camera.mjs?v=0.3.23-camera-layout-1"></script>
+  <script type="module" src="./external-camera.mjs?v=0.3.24-auto-flow-1"></script>
 </body>
 </html>
