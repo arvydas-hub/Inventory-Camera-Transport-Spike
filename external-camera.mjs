@@ -225,11 +225,7 @@ export function createExternalCameraWindowClient(config = {}) {
   }
 
   function openerIsClosed() {
-    try {
-      return openerWindow.closed === true;
-    } catch {
-      return true;
-    }
+    return externalCameraOpenerIsClosed(openerWindow);
   }
 
   function post(message) {
@@ -528,6 +524,9 @@ function scannerFormats(formatObject) {
 }
 
 function cameraFailureMessage(error) {
+  if (error?.code === 'CAMERA_SURFACE_UNAVAILABLE') {
+    return 'The camera preview could not be displayed. Reload this camera tab and try again.';
+  }
   if (isCameraPermissionError(error)) {
     return 'Camera permission was denied. Allow camera access for this page and try again.';
   }
@@ -593,8 +592,22 @@ export function externalCameraOpenerIsClosed(openerWindow) {
   try {
     return !openerWindow || openerWindow.closed === true;
   } catch {
-    return true;
+    // Some mobile browsers can temporarily make a live cross-origin WindowProxy
+    // unreadable while changing tabs. Treat that as unknown; postMessage and the
+    // authenticated parent stop message remain the authoritative liveness checks.
+    return false;
   }
+}
+
+export function externalCameraReaderHasUsableWidth(reader) {
+  let rectWidth = 0;
+  try {
+    rectWidth = Number(reader?.getBoundingClientRect?.().width) || 0;
+  } catch {
+    rectWidth = 0;
+  }
+  const clientWidth = Number(reader?.clientWidth) || 0;
+  return Math.max(clientWidth, rectWidth) >= 1;
 }
 
 export function bootstrapExternalCameraPage({
@@ -801,15 +814,25 @@ export function bootstrapExternalCameraPage({
     setStatus('Starting camera…');
     const Html5QrcodeClass = windowObject.Html5Qrcode;
     const result = await startCamera({
-      startAttempt: (source, scannerConfig) => lifecycle.startScanner((scanner) => (
-        scanner.start(source, scannerConfig, handleDecoded, () => {})
-      )),
+      startAttempt: (source, scannerConfig) => lifecycle.startScanner((scanner) => {
+        if (!externalCameraReaderHasUsableWidth(reader)) {
+          throw new ExternalCameraWindowError(
+            'CAMERA_SURFACE_UNAVAILABLE',
+            'The camera preview area is not visible.',
+          );
+        }
+        return scanner.start(source, scannerConfig, handleDecoded, () => {});
+      }),
       enumerateCameras: () => Html5QrcodeClass.getCameras(),
       canContinue: () => client.isReady() && documentObject.visibilityState !== 'hidden',
     });
     if (result.ok) {
       setStatus('Camera ready. Hold one code inside the square.', 'ok');
-    } else if (result.code !== 'CAMERA_CANCELLED') {
+    } else if (result.code === 'CAMERA_CANCELLED') {
+      if (!terminated && documentObject.visibilityState === 'hidden') {
+        setStatus('Camera start stopped because this tab stayed hidden. Return here and tap Start camera again.');
+      }
+    } else {
       setStatus(cameraFailureMessage(result.error), 'error');
     }
     updateButtons();
@@ -835,8 +858,13 @@ export function bootstrapExternalCameraPage({
   });
 
   const stopForHiddenDocument = () => {
-    if (documentObject.visibilityState === 'hidden' && lifecycle) {
-      lifecycle.stop('document-hidden');
+    if (
+      documentObject.visibilityState === 'hidden'
+      && lifecycle
+      && lastState === 'scanner-running'
+    ) {
+      setStatus('Camera stopped because this tab was hidden. Tap Start camera to resume.');
+      void lifecycle.stop('document-hidden').then(updateButtons);
     }
   };
   const teardown = () => { void terminate('page-exit'); };

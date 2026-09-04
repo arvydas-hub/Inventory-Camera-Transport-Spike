@@ -77,13 +77,27 @@
     }
 
     #reader {
+      width: 100%;
+      min-height: 220px;
       overflow: hidden;
       margin-top: 14px;
       border-radius: 10px;
       background: #000;
     }
 
-    #reader:empty { display: none; }
+    #reader[hidden] {
+      display: none !important;
+    }
+
+    #reader:not([hidden]) {
+      display: block;
+    }
+
+    #reader video {
+      width: 100% !important;
+      height: auto !important;
+      object-fit: cover;
+    }
 
     #status {
       min-height: 24px;
@@ -131,6 +145,6 @@
     </section>
   </main>
 
-  <script type="module" src="./external-camera.mjs?v=0.3.22-popup-2"></script>
+  <script type="module" src="./external-camera.mjs?v=0.3.23-camera-layout-1"></script>
 </body>
 </html>
