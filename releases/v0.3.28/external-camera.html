@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'none'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Inventory Camera</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #080b12;
+      color: #f8fafc;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: #080b12;
+    }
+
+    main {
+      width: min(100%, 760px);
+      margin: 0 auto;
+      padding: max(16px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom));
+    }
+
+    .card {
+      margin-bottom: 14px;
+      padding: 18px;
+      border: 1px solid #3b4353;
+      border-radius: 12px;
+      background: #171a21;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: clamp(1.45rem, 5vw, 2rem);
+    }
+
+    p { line-height: 1.45; }
+
+    .muted { color: #bdc7da; }
+
+    .app-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 14px;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 4px 9px;
+      border: 1px solid #596273;
+      border-radius: 999px;
+      background: #242833;
+      color: #dbe4f5;
+      font-size: 0.82rem;
+      font-weight: 700;
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    button {
+      min-width: 0;
+      min-height: 44px;
+      padding: 8px 10px;
+      border: 1px solid #596273;
+      border-radius: 8px;
+      background: #242833;
+      color: #fff;
+      font: inherit;
+      font-size: 0.92rem;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    button.primary {
+      border-color: #2f6feb;
+      background: #2f6feb;
+    }
+
+    #startButton,
+    #restartButton { grid-column: 1; }
+
+    #stopButton { grid-column: 2; }
+    button.return { grid-column: 3; }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.48;
+    }
+
+    #reader {
+      width: 100%;
+      min-height: 220px;
+      overflow: hidden;
+      margin-top: 10px;
+      border-radius: 10px;
+      background: #000;
+    }
+
+    #reader[hidden] {
+      display: none !important;
+    }
+
+    #reader:not([hidden]) {
+      display: block;
+    }
+
+    #reader video {
+      display: block !important;
+      width: 100% !important;
+      height: auto !important;
+      object-fit: cover;
+      visibility: visible !important;
+      opacity: 1 !important;
+    }
+
+    #status {
+      min-height: 24px;
+      margin: 10px 0 0;
+      color: #fbbf24;
+      font-weight: 650;
+    }
+
+    #status.ok { color: #34d399; }
+    #status.error { color: #fb7185; }
+
+    .camera-help {
+      margin-top: 14px;
+      border-top: 1px solid #3b4353;
+      padding-top: 12px;
+      color: #bdc7da;
+      font-size: 0.9rem;
+      line-height: 1.45;
+    }
+
+    .camera-help summary {
+      min-height: 44px;
+      cursor: pointer;
+      color: #dbe4f5;
+      font-weight: 700;
+    }
+
+    .camera-help ol {
+      margin: 8px 0 0;
+      padding-left: 22px;
+    }
+
+    .camera-help li + li {
+      margin-top: 6px;
+    }
+
+    @media (max-width: 480px) {
+      main { padding-left: 10px; padding-right: 10px; }
+      .card { padding: 14px; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="card" aria-labelledby="pageTitle">
+      <h1 id="pageTitle">Inventory Camera</h1>
+      <div class="app-meta" aria-label="Application environment and version">
+        <span class="tag">v0.3.28</span>
+      </div>
+      <p class="muted">
+        Scan a barcode. After a successful scan, you will return to Inventory automatically.
+      </p>
+      <div class="controls">
+        <button id="startButton" class="primary" type="button" aria-label="Start camera" disabled>Start</button>
+        <button id="restartButton" type="button" aria-label="Restart camera" disabled hidden>Restart</button>
+        <button id="stopButton" type="button" disabled>Stop</button>
+        <button id="returnButton" class="return" type="button" aria-label="Return to inventory">Return</button>
+      </div>
+      <div id="status" role="status" aria-live="polite">Checking the inventory connection…</div>
+      <div id="reader" hidden></div>
+      <details class="camera-help">
+        <summary>Camera help</summary>
+        <div>This app cannot change browser permissions. For a dark preview in Samsung Internet:</div>
+        <ol>
+          <li>Open Samsung Internet Settings → Sites and downloads → Site permissions → Camera, then reset camera access for arvydas-hub.github.io.</li>
+          <li>In phone Settings → Apps → Samsung Internet → Permissions → Camera, allow access while using the app.</li>
+          <li>Confirm the phone's Camera access switch is on, return here, and tap Restart camera.</li>
+        </ol>
+      </details>
+    </section>
+  </main>
+
+  <script type="module" src="./external-camera.mjs?v=0.3.28-visible-grace-1"></script>
+</body>
+</html>
